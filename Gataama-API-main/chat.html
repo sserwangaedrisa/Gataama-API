@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chatbot Test</title>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+</head>
+<body>
+    <h2>AI Chatbot Test</h2>
+    <input type="text" id="message" placeholder="Type your message" />
+    <button onclick="sendMessage()">Send</button>
+    <div id="response"></div>
+
+    <script>
+        const socket = io('http://localhost:8080');
+
+        // Send a message to the server
+        function sendMessage() {
+            const message = document.getElementById("message").value;
+            socket.emit("chatMessage", { text: message });
+        }
+
+        // Listen for AI response
+        socket.on("chatMessage", (data) => {
+            const responseDiv = document.getElementById("response");
+            responseDiv.innerHTML = `<p><strong>${data.sender}:</strong> ${data.text}</p>`;
+        });
+    </script>
+</body>
+</html>
