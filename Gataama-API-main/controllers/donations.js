@@ -7,74 +7,80 @@ const db = require("../middleware/db");
 
 exports.getPaymentUrl = async (req, res) => {
   try {
-    if (Number(req.body.amount) > 0) {
-      const formData = {
-        tx_ref: uuidv4(),
-        amount: req.body.amount,
-        currency: req.body.currency,
-        redirect_url: `${process.env.PAYMENT_URL}/donation-status`,
-        customer: {
-          email: req.body.email,
-          name: req.body.fullNames,
-        },
-        meta: {
-          donationType: req.body.donationType,
-        },
-        customizations: {
-          title: "Gataama",
-          logo: "https://gatamaapi.tickets2go.net/avatars/logo.jpg",
-          description: `Donation for ${req.body.donationTitle}`,
-        },
-        // payment_options: "card, account, banktransfer, mpesa, mobilemoneyghana, mobilemoneyfranco, mobilemoneyuganda, mobilemoneyrwanda, mobilemoneyzambia, nqr, ussd"
+    
+    // Validating the inputs.
+    if (!req.body.amount || Number(req.body.amount) <= 0) {
+      return res.status(400).send({ message: "Invalid amount set" }); 
+    }
+    
+    // Enhanced the required fields
+    if (!req.body.email || !req.body.currency || !req.body.fullNames) {
+      return res.status(400).send({ message: "Missing required fields" }); 
+    }
+
+    const formData = {
+      tx_ref: uuidv4(),
+      amount: req.body.amount,
+      currency: req.body.currency,
+      redirect_url: `${process.env.PAYMENT_URL}/donation-status`,
+      customer: {
+        email: req.body.email,
+        name: req.body.fullNames,
+      },
+      meta: {
+        donationType: req.body.donationType,
+      },
+      customizations: {
+        title: "Gataama",
+        logo: "https://gatamaapi.tickets2go.net/avatars/logo.jpg",
+        description: `Donation for ${req.body.donationTitle}`,
+      },
+    };
+
+    const axiosInstance = axios.create({
+      headers: {
+        Authorization: `Bearer ${process.env.FLWV_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+      httpsAgent: new https.Agent({ keepAlive: true }),
+    });
+
+    let baseURL = `https://api.flutterwave.com/v3/payments`;
+
+    const response = await axiosInstance.post(baseURL, formData);
+
+    // API response validation
+    if (response.data.data && response.data.data.link) {
+      const dt = {
+        tx_ref: formData.tx_ref,
+        amount: formData.amount,
+        currency: formData.currency,
+        donationType: req.body.donationType,
+        email: formData.customer.email,
+        fullNames: formData.customer.name,
+        transactionType: "deposit",
       };
 
-      const axiosInstance = axios.create({
-        headers: {
-          Authorization: `Bearer ${process.env.FLWV_SECRET_KEY}`,
-          "Content-Type": "application/json",
-        },
-        httpsAgent: new https.Agent({ keepAlive: true }),
+      const transaction = await prisma.transaction.create({
+        data: dt,
       });
 
-      let baseURL = `https://api.flutterwave.com/v3/payments`;
-
-      const response = await axiosInstance.post(baseURL, formData);
-
-      if (response.data.data.link) {
-        const dt = {
-          tx_ref: formData.tx_ref,
-          amount: formData.amount,
-          currency: formData.currency,
-          donationType: req.body.donationType,
-          email: formData.customer.email,
-          fullNames: formData.customer.name,
-          transactionType: "deposit",
-        };
-
-        const transaction = await prisma.transaction.create({
-          data: dt,
-        });
-
-        res.status(200).send({
-          url: response.data.data.link,
-        });
-      } else {
-        res.status(500).send({
-          message: "Failed to load payment screen, kindly try again",
-        });
-      }
+      res.status(200).send({
+        url: response.data.data.link,
+      });
     } else {
-      res.status(403).send({
-        message: "Invalid amount set",
+      res.status(500).send({
+        message: "Failed to load payment screen, kindly try again",
       });
     }
   } catch (error) {
-    console.error(error);
+    console.error("Error in getPaymentUrl:", error); // Catching errors while emailing the donor.
     res.status(500).send({
       message: process.env.ERROR_MESSAGE,
     });
   }
 };
+
 exports.webhookUrl = async (req, res) => {
   try {
     const current_url = new URL(
@@ -109,12 +115,18 @@ exports.webhookUrl = async (req, res) => {
         },
       });
 
-      // Update wallet balance (assuming `wallet` is another table/model in your database)
+      // Ensuring wallet exists before updating balance
       const wallet = await prisma.wallet.findUnique({
         where: {
           symbol: transaction.currency,
         },
       });
+
+      if (!wallet) {
+        return res.status(404).send({
+          message: "Wallet not found",
+        });
+      }
 
       const updatedAmount = Number(wallet.amount) + Number(transaction.amount);
 
@@ -127,57 +139,59 @@ exports.webhookUrl = async (req, res) => {
         },
       });
 
-      // Send email thanking donor
-      const transporter = nodemailer.createTransport({
-        host: "smtp.ionos.com",
-        port: 587,
-        auth: {
-          user: process.env.SENDER_EMAIL,
-          pass: process.env.SENDER_EMAIL_PASSWORD,
-        },
-      });
+      // Wrapped email sending in try/catch block
+      try {
+        const transporter = nodemailer.createTransport({
+          host: "smtp.ionos.com",
+          port: 587,
+          auth: {
+            user: process.env.SENDER_EMAIL,
+            pass: process.env.SENDER_EMAIL_PASSWORD,
+          },
+        });
 
-      const message = {
-        from: `"Gataama" <${process.env.SENDER_EMAIL}>`,
-        to: transaction.email,
-        subject: `Thank you for your Donation`,
-        html: `<!DOCTYPE html>
-          <html lang="en">
-            <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Receipt Gataama</title>
-              <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.2.2/css/bootstrap.min.css"
-                integrity="sha512-CpIKUSyh9QX2+zSdfGP+eWLx23C8Dj9/XmHjZY2uDtfkdLGo0uY12jgcnkX9vXOgYajEKb/jiw67EYm+kBf+6g=="
-                crossorigin="anonymous" referrerpolicy="no-referrer" />
-              <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet" />
-            </head>
-            <body>
-              <div class="container">
-                <div class="row">
-                  <div class="col">
-                    <p>Dear ${transaction.fullNames}</p>
-                    <p>I hope this message finds you well. On behalf of Gataama, I want to express our deepest gratitude for your generous donation of ${transaction.currency} ${transaction.amount} to support our cause.</p>
-                    <p>Your contribution means more than words can express. With your support, we can continue our efforts to promote unity, empowerment, and progress across the African continent and its diaspora. Your belief in our mission is truly inspiring, and it reaffirms our commitment to making a positive impact in the lives of people throughout Africa and beyond.</p>
-                    <p>Your donation will directly contribute to initiatives aimed at fostering social, economic, and political development, as well as promoting cultural exchange and solidarity among African communities worldwide.</p>
-                    <p>Once again, thank you for your generosity and support. Together, we can work towards a brighter future for all Africans.</p>
-                    <p>With heartfelt thanks,</p>
-                    <br />
-                    <p>Best,</p>
-                    <h3>The Management of GATAAMA FOUNDATION.</h3>
+        const message = {
+          from: `Gataama <${process.env.SENDER_EMAIL}>`,
+          to: transaction.email,
+          subject: "Thank you for your Donation",
+          html: `<!DOCTYPE html>
+            <html lang="en">
+              <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Receipt Gataama</title>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.2.2/css/bootstrap.min.css"
+                  integrity="sha512-CpIKUSyh9QX2+zSdfGP+eWLx23C8Dj9/XmHjZY2uDtfkdLGo0uY12jgcnkX9vXOgYajEKb/jiw67EYm+kBf+6g=="
+                  crossorigin="anonymous" referrerpolicy="no-referrer" />
+                <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet" />
+              </head>
+              <body>
+                <div class="container">
+                  <div class="row">
+                    <div class="col">
+                      <p>Dear ${transaction.fullNames}</p>
+                      <p>I hope this message finds you well. On behalf of Gataama, I want to express our deepest gratitude for your generous donation of ${transaction.currency} ${transaction.amount} to support our cause.</p>
+                      <p>Your contribution means more than words can express. With your support, we can continue our efforts to promote unity, empowerment, and progress across the African continent and its diaspora. Your belief in our mission is truly inspiring, and it reaffirms our commitment to making a positive impact in the lives of people throughout Africa and beyond.</p>
+                      <p>Your donation will directly contribute to initiatives aimed at fostering social, economic, and political development, as well as promoting cultural exchange and solidarity among African communities worldwide.</p>
+                      <p>Once again, thank you for your generosity and support. Together, we can work towards a brighter future for all Africans.</p>
+                      <p>With heartfelt thanks,</p>
+                      <br />
+                      <p>Best,</p>
+                      <h3>The Management of GATAAMA FOUNDATION.</h3>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.2.2/js/bootstrap.min.js"
-                integrity="sha512-5BqtYqlWfJemW5+v+TZUs22uigI8tXeVah5S/1Z6qBLVO7gakAOtkOzUtgq6dsIo5c0NJdmGPs0H9I+2OHUHVQ=="
-                crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-              <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
-            </body>
-          </html>
-          `,
-      };
+              </body>
+            </html>`,
+        };
 
-      await transporter.sendMail(message);
+        await transporter.sendMail(message);
+      } catch (emailError) {
+        console.error("Error sending email:", emailError);
+        return res.status(500).send({
+          message: "Error sending email, but your donation was successful.",
+        });
+      }
 
       res.status(200).send({
         message: `Thank you for your Donation, check your email (${transaction.email})`,
@@ -199,12 +213,13 @@ exports.webhookUrl = async (req, res) => {
       });
     }
   } catch (error) {
-    console.error(error);
+    console.error("Error in webhookUrl:", error); 
     res.status(500).send({
       message: "Error with payment, kindly contact support",
     });
   }
 };
+
 exports.getCurrencies = async (req, res) => {
   try {
     const currencies = await prisma.wallet.findMany({
@@ -220,7 +235,7 @@ exports.getCurrencies = async (req, res) => {
       currencies: currencies,
     });
   } catch (error) {
-    console.error(error);
+    console.error("Error in getCurrencies:", error); 
     res.status(500).send({
       message: process.env.ERROR_MESSAGE,
     });
@@ -256,7 +271,7 @@ exports.getAdminAnalytics = async (req, res) => {
       transactions: transactions,
     });
   } catch (error) {
-    console.error(error);
+    console.error("Error in getAdminAnalytics:", error); 
     res.status(500).send({
       message: process.env.ERROR_MESSAGE,
     });
